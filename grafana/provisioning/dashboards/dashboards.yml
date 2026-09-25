@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: "Intel XPU Monitoring"
+    orgId: 1
+    folder: "Intel XPU"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10   # re-checks disk every 10s
+    allowUiUpdates: false       # always reload from JSON file, never from UI edits
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

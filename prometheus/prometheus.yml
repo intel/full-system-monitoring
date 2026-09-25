@@ -1,0 +1,46 @@
+# Prometheus configuration — single-node unified mode
+# Scrapes xpumd (GPU HW metrics) and vLLM inference endpoints directly
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  scrape_timeout: 4s
+
+# Recording rules — derive friendly GPU card label from hw_gpu_info dynamically
+rule_files:
+  - /etc/prometheus/gpu_labels.yml
+
+scrape_configs:
+  # xpumd v2.0 — GPU hardware metrics via Level Zero
+  # hw_gpu_info metric provides hw_model and hw_name labels per pci_bdf
+  # Dashboard uses group_left join to get friendly names dynamically
+  - job_name: "xpumd"
+    scrape_interval: 5s
+    scrape_timeout: 4s
+    static_configs:
+      - targets: ["localhost:9471"]
+
+  # Node Exporter — CPU, RAM, disk, network
+  - job_name: "node"
+    scrape_interval: 5s
+    scrape_timeout: 4s
+    static_configs:
+      - targets: ["localhost:9100"]
+
+  # vLLM inference endpoints — scraped directly every 5s
+  # Ports without vLLM are marked "down" (no error, <1ms cost per empty port).
+  # When vLLM starts on any port, metrics appear within 5 seconds.
+  - job_name: "vllm"
+    scrape_interval: 5s
+    scrape_timeout: 4s
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "localhost:8000"
+          - "localhost:8001"
+          - "localhost:8002"
+          - "localhost:8003"
+          - "localhost:8004"
+          - "localhost:8005"
+          - "localhost:8006"
+          - "localhost:8007"
+          - "localhost:8008"

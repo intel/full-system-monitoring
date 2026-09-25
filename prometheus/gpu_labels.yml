@@ -1,0 +1,179 @@
+# Recording rules — GPU metrics with 0-indexed card labels
+# Maps pci_bdf to gpu-0 through gpu-7 (auto-discovered order from xpumd)
+groups:
+  - name: gpu_card_map
+    interval: 5s
+    rules:
+      # Map pci_bdf → card-N using metric_relabel equivalent via label_replace chain
+      # The pci_bdf order from xpumd is the physical slot order
+      - record: gpu:card_info
+        expr: >
+          label_replace(label_replace(label_replace(label_replace(
+          label_replace(label_replace(label_replace(label_replace(
+            hw_gpu_info{hw_gpu_type="discrete"},
+            "card", "gpu-0", "hw_name", "gpu-1"),
+            "card", "gpu-1", "hw_name", "gpu-2"),
+            "card", "gpu-2", "hw_name", "gpu-3"),
+            "card", "gpu-3", "hw_name", "gpu-4"),
+            "card", "gpu-4", "hw_name", "gpu-5"),
+            "card", "gpu-5", "hw_name", "gpu-6"),
+            "card", "gpu-6", "hw_name", "gpu-7"),
+            "card", "gpu-7", "hw_name", "gpu-8")
+
+  - name: gpu_metrics
+    interval: 5s
+    rules:
+      - record: gpu:utilization
+        # Ratio metric — clamp corrupt >1 samples from xpumd to 1 (see gpu:power_watts).
+        expr: >
+          label_replace(label_replace(label_replace(label_replace(
+          label_replace(label_replace(label_replace(label_replace(
+            avg by (pci_bdf) (clamp_max(hw_gpu_utilization_ratio{hw_gpu_task="all"}, 1))
+            * on(pci_bdf) group_left(hw_name, hw_model)
+            max by (pci_bdf, hw_name, hw_model) (hw_gpu_info{hw_gpu_type="discrete"}),
+            "hw_name", "gpu-0", "hw_name", "^gpu-1$"),
+            "hw_name", "gpu-1", "hw_name", "^gpu-2$"),
+            "hw_name", "gpu-2", "hw_name", "^gpu-3$"),
+            "hw_name", "gpu-3", "hw_name", "^gpu-4$"),
+            "hw_name", "gpu-4", "hw_name", "^gpu-5$"),
+            "hw_name", "gpu-5", "hw_name", "^gpu-6$"),
+            "hw_name", "gpu-6", "hw_name", "^gpu-7$"),
+            "hw_name", "gpu-7", "hw_name", "^gpu-8$")
+
+      - record: gpu:temperature_gpu
+        expr: >
+          label_replace(label_replace(label_replace(label_replace(
+          label_replace(label_replace(label_replace(label_replace(
+            (max by (pci_bdf) (hw_temperature_celsius{hw_sensor_location="gpu", statistic="max"})
+            or on(pci_bdf)
+            label_replace(
+              max by (chip) (
+                node_hwmon_temp_celsius
+                * on(chip, sensor) group_left(label)
+                node_hwmon_sensor_label{label="pkg"}
+              ),
+              "pci_bdf", "$1:$2:$3.$4", "chip",
+              ".*_([0-9a-f]{4}):([0-9a-f]{2}):([0-9a-f]{2})_([0-9])"
+            ))
+            * on(pci_bdf) group_left(hw_name, hw_model)
+            max by (pci_bdf, hw_name, hw_model) (hw_gpu_info{hw_gpu_type="discrete"}),
+            "hw_name", "gpu-0", "hw_name", "^gpu-1$"),
+            "hw_name", "gpu-1", "hw_name", "^gpu-2$"),
+            "hw_name", "gpu-2", "hw_name", "^gpu-3$"),
+            "hw_name", "gpu-3", "hw_name", "^gpu-4$"),
+            "hw_name", "gpu-4", "hw_name", "^gpu-5$"),
+            "hw_name", "gpu-5", "hw_name", "^gpu-6$"),
+            "hw_name", "gpu-6", "hw_name", "^gpu-7$"),
+            "hw_name", "gpu-7", "hw_name", "^gpu-8$")
+
+      - record: gpu:temperature_memory
+        expr: >
+          label_replace(label_replace(label_replace(label_replace(
+          label_replace(label_replace(label_replace(label_replace(
+            (max by (pci_bdf) (hw_temperature_celsius{hw_sensor_location="memory", statistic="max"})
+            or on(pci_bdf)
+            label_replace(
+              max by (chip) (
+                node_hwmon_temp_celsius
+                * on(chip, sensor) group_left(label)
+                node_hwmon_sensor_label{label="vram"}
+              ),
+              "pci_bdf", "$1:$2:$3.$4", "chip",
+              ".*_([0-9a-f]{4}):([0-9a-f]{2}):([0-9a-f]{2})_([0-9])"
+            ))
+            * on(pci_bdf) group_left(hw_name, hw_model)
+            max by (pci_bdf, hw_name, hw_model) (hw_gpu_info{hw_gpu_type="discrete"}),
+            "hw_name", "gpu-0", "hw_name", "^gpu-1$"),
+            "hw_name", "gpu-1", "hw_name", "^gpu-2$"),
+            "hw_name", "gpu-2", "hw_name", "^gpu-3$"),
+            "hw_name", "gpu-3", "hw_name", "^gpu-4$"),
+            "hw_name", "gpu-4", "hw_name", "^gpu-5$"),
+            "hw_name", "gpu-5", "hw_name", "^gpu-6$"),
+            "hw_name", "gpu-6", "hw_name", "^gpu-7$"),
+            "hw_name", "gpu-7", "hw_name", "^gpu-8$")
+
+      - record: gpu:memory_used_bytes
+        expr: >
+          label_replace(label_replace(label_replace(label_replace(
+          label_replace(label_replace(label_replace(label_replace(
+            max by (pci_bdf) (hw_memory_usage_bytes)
+            * on(pci_bdf) group_left(hw_name, hw_model)
+            max by (pci_bdf, hw_name, hw_model) (hw_gpu_info{hw_gpu_type="discrete"}),
+            "hw_name", "gpu-0", "hw_name", "^gpu-1$"),
+            "hw_name", "gpu-1", "hw_name", "^gpu-2$"),
+            "hw_name", "gpu-2", "hw_name", "^gpu-3$"),
+            "hw_name", "gpu-3", "hw_name", "^gpu-4$"),
+            "hw_name", "gpu-4", "hw_name", "^gpu-5$"),
+            "hw_name", "gpu-5", "hw_name", "^gpu-6$"),
+            "hw_name", "gpu-6", "hw_name", "^gpu-7$"),
+            "hw_name", "gpu-7", "hw_name", "^gpu-8$")
+
+      - record: gpu:memory_utilization
+        # Ratio metric — clamp corrupt >1 samples from xpumd to 1 (see gpu:power_watts).
+        expr: >
+          label_replace(label_replace(label_replace(label_replace(
+          label_replace(label_replace(label_replace(label_replace(
+            max by (pci_bdf) (clamp_max(hw_memory_usage_bytes / hw_memory_size_bytes, 1))
+            * on(pci_bdf) group_left(hw_name, hw_model)
+            max by (pci_bdf, hw_name, hw_model) (hw_gpu_info{hw_gpu_type="discrete"}),
+            "hw_name", "gpu-0", "hw_name", "^gpu-1$"),
+            "hw_name", "gpu-1", "hw_name", "^gpu-2$"),
+            "hw_name", "gpu-2", "hw_name", "^gpu-3$"),
+            "hw_name", "gpu-3", "hw_name", "^gpu-4$"),
+            "hw_name", "gpu-4", "hw_name", "^gpu-5$"),
+            "hw_name", "gpu-5", "hw_name", "^gpu-6$"),
+            "hw_name", "gpu-6", "hw_name", "^gpu-7$"),
+            "hw_name", "gpu-7", "hw_name", "^gpu-8$")
+
+      - record: gpu:memory_bandwidth
+        # Ratio metric — clamp corrupt >1 samples from xpumd to 1 (see gpu:power_watts).
+        expr: >
+          label_replace(label_replace(label_replace(label_replace(
+          label_replace(label_replace(label_replace(label_replace(
+            max by (pci_bdf) (clamp_max(hw_memory_bandwidth_utilization_ratio, 1))
+            * on(pci_bdf) group_left(hw_name, hw_model)
+            max by (pci_bdf, hw_name, hw_model) (hw_gpu_info{hw_gpu_type="discrete"}),
+            "hw_name", "gpu-0", "hw_name", "^gpu-1$"),
+            "hw_name", "gpu-1", "hw_name", "^gpu-2$"),
+            "hw_name", "gpu-2", "hw_name", "^gpu-3$"),
+            "hw_name", "gpu-3", "hw_name", "^gpu-4$"),
+            "hw_name", "gpu-4", "hw_name", "^gpu-5$"),
+            "hw_name", "gpu-5", "hw_name", "^gpu-6$"),
+            "hw_name", "gpu-6", "hw_name", "^gpu-7$"),
+            "hw_name", "gpu-7", "hw_name", "^gpu-8$")
+
+      - record: gpu:frequency_hz
+        expr: >
+          label_replace(label_replace(label_replace(label_replace(
+          label_replace(label_replace(label_replace(label_replace(
+            max by (pci_bdf) (hw_frequency_hertz{hw_frequency_domain="gpu", aggregation="avg"})
+            * on(pci_bdf) group_left(hw_name, hw_model)
+            max by (pci_bdf, hw_name, hw_model) (hw_gpu_info{hw_gpu_type="discrete"}),
+            "hw_name", "gpu-0", "hw_name", "^gpu-1$"),
+            "hw_name", "gpu-1", "hw_name", "^gpu-2$"),
+            "hw_name", "gpu-2", "hw_name", "^gpu-3$"),
+            "hw_name", "gpu-3", "hw_name", "^gpu-4$"),
+            "hw_name", "gpu-4", "hw_name", "^gpu-5$"),
+            "hw_name", "gpu-5", "hw_name", "^gpu-6$"),
+            "hw_name", "gpu-6", "hw_name", "^gpu-7$"),
+            "hw_name", "gpu-7", "hw_name", "^gpu-8$")
+
+      - record: gpu:power_watts
+        # xpumd intermittently emits corrupt samples (~3.7e12 W). DROP them with a
+        # `< 700` filter (real card peak is ~275 W, well under Arc Pro TDP) rather
+        # than clamping — clamping would cap garbage AT the ceiling and still spike
+        # the graph. Filtering removes the sample entirely so only real values show.
+        expr: >
+          label_replace(label_replace(label_replace(label_replace(
+          label_replace(label_replace(label_replace(label_replace(
+            max by (pci_bdf) (hw_power_watts{hw_sensor_location="card"} < 700)
+            * on(pci_bdf) group_left(hw_name, hw_model)
+            max by (pci_bdf, hw_name, hw_model) (hw_gpu_info{hw_gpu_type="discrete"}),
+            "hw_name", "gpu-0", "hw_name", "^gpu-1$"),
+            "hw_name", "gpu-1", "hw_name", "^gpu-2$"),
+            "hw_name", "gpu-2", "hw_name", "^gpu-3$"),
+            "hw_name", "gpu-3", "hw_name", "^gpu-4$"),
+            "hw_name", "gpu-4", "hw_name", "^gpu-5$"),
+            "hw_name", "gpu-5", "hw_name", "^gpu-6$"),
+            "hw_name", "gpu-6", "hw_name", "^gpu-7$"),
+            "hw_name", "gpu-7", "hw_name", "^gpu-8$")

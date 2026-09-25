@@ -1,0 +1,34 @@
+# xpumd receiver → Prometheus exporter on :9471.
+#
+# Both listeners below are bound to loopback on purpose. The only consumer is
+# Prometheus running on this same host (see prometheus/prometheus.yml), the
+# endpoint has no authentication, and the stack is documented as single-node, so
+# there is nothing to gain from binding a wider interface. If you genuinely need
+# to scrape this host from another machine, change the exporter endpoint to
+# 0.0.0.0:9471 here and put a firewall rule in front of the port.
+receivers:
+  intelxpu:
+    collection_interval: 5s
+    initial_delay: 1s
+    sampling_interval: 1s
+processors:
+  intelxpustatus: {}
+exporters:
+  prometheus:
+    endpoint: "127.0.0.1:9471"
+service:
+  telemetry:
+    metrics:
+      # The collector's own internal metrics. Nothing scrapes 8889; it is kept
+      # for troubleshooting and stays on loopback.
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: "127.0.0.1"
+                port: 8889
+  pipelines:
+    metrics:
+      receivers: [intelxpu]
+      processors: [intelxpustatus]
+      exporters: [prometheus]

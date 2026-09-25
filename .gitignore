@@ -1,0 +1,12 @@
+# Nothing generated belongs in this repo — it is config only.
+.DS_Store
+*.swp
+
+# docker-compose.yml reads overrides from .env, and the documented way to set a
+# Grafana admin password is to put it there. Never commit it.
+.env
+.env.*
+!.env.example
+
+# Local compose overrides can carry host-specific paths and credentials.
+docker-compose.override.yml

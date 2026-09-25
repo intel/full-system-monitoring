@@ -1,0 +1,238 @@
+name: Generate Clean SPDX SBOM with Trivy
+
+on:
+  push:
+    branches: [ "main" ]
+  # Also run on pull requests that touch the compose file or this workflow, so a
+  # change to the job is exercised before it lands. Without this, main is the only
+  # trigger and every defect in here stays invisible until after a merge, which is
+  # exactly how the first two runs failed. Note the job checks out main (see the
+  # checkout step), so a PR run proves the workflow works -- it does not scan the
+  # PR's own compose file.
+  pull_request:
+    paths:
+      - docker-compose.yml
+      - .github/workflows/trivy-sbom.yml
+  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
+
+# The job only reads the repo and uploads an artifact, so drop everything else.
+# Without this block the token inherits the repo/org default, which can be
+# read-write on all scopes.
+permissions:
+  contents: read
+
+# A newer push makes an in-flight run pointless, so cancel the old run rather
+# than letting it queue behind the new one.
+concurrency:
+  group: trivy-sbom-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trivy-sbom:
+    runs-on: ubuntu-latest
+    # A missing or busy runner would otherwise let this job queue silently and
+    # forever instead of failing, so put a bound on it.
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          # The SBOM always describes main, whatever triggered the run: main is
+          # what is deployed, so it is the only inventory worth publishing, and a
+          # PR run cannot produce an artifact that looks authoritative but
+          # describes a branch.
+          #
+          # Consequence to know about: a PR that edits docker-compose.yml is NOT
+          # validated against its own change, because the scan reads main's
+          # compose. Changes to this workflow are still exercised on the PR --
+          # pull_request runs the workflow file from the PR, only the scanned
+          # tree comes from main.
+          ref: main
+
+      - name: Install Trivy
+        env:
+          # Pinned so the SBOMs are reproducible and so an SBOM workflow is not
+          # itself piping an unpinned remote script into a shell: install.sh is
+          # fetched from this tag rather than main (where it can change under
+          # us), and the same tag is passed on to pin the Trivy binary.
+          TRIVY_VERSION: v0.74.0
+        run: |
+          # Install into RUNNER_TEMP, not /usr/local/bin: the runner
+          # does not run as root, so install(1) there fails with "Permission
+          # denied" and the job dies before Trivy exists. RUNNER_TEMP is writable
+          # and per-job; GITHUB_PATH puts it on PATH for the steps that follow.
+          mkdir -p "${RUNNER_TEMP}/bin"
+          curl -sfL "https://raw.githubusercontent.com/aquasecurity/trivy/${TRIVY_VERSION}/contrib/install.sh" \
+            | sh -s -- -b "${RUNNER_TEMP}/bin" "${TRIVY_VERSION}"
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/bin/trivy" --version
+
+      - name: Generate Clean SPDX JSON for Compose Images
+        env:
+          # Same reason as the binary: a non-root runner may not own the default
+          # cache location, and Trivy writes here before it writes the SBOM.
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          # 1. Grab all 'image:' declarations from the compose file.
+          #
+          # grep -oE, not -oP: PCRE is a GNU grep extension and is absent from
+          # busybox, so -P silently makes this job runner-dependent. -E is in
+          # POSIX and works everywhere; sed strips the key and any quotes.
+          IMAGES=$(grep -oE '^[[:space:]]*image:[[:space:]]*[^[:space:]]+' docker-compose.yml \
+            | sed -E 's/^[[:space:]]*image:[[:space:]]*//; s/^["'"'"']//; s/["'"'"']$//')
+
+          if [ -z "$IMAGES" ]; then
+            echo "::error::no image: entries found in docker-compose.yml"
+            exit 1
+          fi
+          echo "Images to scan:"
+          echo "$IMAGES" | sed 's/^/  /'
+
+          # Create an output directory for the SBOM files. Cleared first: a
+          # workspace can be reused between runs, and a stale file here would be
+          # picked up by the merge step below and folded into the new document.
+          rm -rf sbom-exports
+          mkdir -p sbom-exports
+
+          # 2. Iterate through each third-party image and generate clean SPDX.
+          failed=0
+          for img in $IMAGES; do
+            # A pull is not required: `trivy image` tries the local daemon first
+            # and falls back to fetching from the registry itself. A runner with
+            # no reachable daemon must therefore not fail the whole job here.
+            echo "Pulling $img..."
+            if docker pull "$img" >/dev/null 2>&1; then
+              echo "  in the local daemon"
+            else
+              echo "  no usable docker daemon; Trivy will read it from the registry"
+            fi
+
+            # Format the filename safely (e.g., redis:latest -> redis_latest)
+            safe_name=$(echo "$img" | tr '/:' '_')
+            out="sbom-exports/${safe_name}.spdx.json"
+
+            echo "Generating clean SPDX SBOM for $img..."
+            if ! trivy image --format spdx-json --output "$out" "$img"; then
+              echo "::error::trivy failed on $img"
+              failed=1
+              continue
+            fi
+
+            # An empty or component-less SBOM is worse than a loud failure: it
+            # uploads as a green run and nobody looks inside the artifact. Checked
+            # with grep rather than python3/jq, neither of which this workflow has
+            # any business assuming is installed on the runner.
+            # Counts references, so it is >= the real package count (SPDXRef-Package
+            # also appears in relationships). Fine as a non-empty gate; do not read
+            # it as an inventory size.
+            n=$(grep -o '"SPDXRef-Package' "$out" 2>/dev/null | wc -l | tr -d ' ')
+            if [ ! -s "$out" ] || ! grep -q '"spdxVersion"' "$out" || [ "${n:-0}" -lt 1 ]; then
+              echo "::error::$out is not SPDX JSON containing packages"
+              failed=1
+            else
+              echo "  $out  ($(wc -c <"$out" | tr -d ' ') bytes, $n SPDX package refs)"
+            fi
+          done
+
+          echo "SBOMs written:"
+          ls -la sbom-exports/ | sed 's/^/  /'
+          exit "$failed"
+
+      - name: Merge into a single SPDX document
+        run: |
+          # Consumers that want one file rather than one per image. The per-image
+          # SBOMs are kept alongside it -- they are what you want for triaging a
+          # single container, and they cost nothing to keep.
+          #
+          # Trivy's SPDXIDs are content hashes, so a component appearing in two
+          # images collides on id and is stored once, referenced by both. Genuine
+          # collisions (same id, different content) get a per-source prefix.
+          command -v python3 >/dev/null || {
+            echo "::error::python3 is not available on this runner; the merge step needs it"
+            exit 1
+          }
+          python3 - <<'PYSCRIPT'
+          import datetime, glob, hashlib, json, os
+
+          OUT = "sbom-exports/all-images.spdx.json"
+          srcs = sorted(f for f in glob.glob("sbom-exports/*.spdx.json") if f != OUT)
+          if not srcs:
+              raise SystemExit("::error::no per-image SPDX files to merge")
+
+          def fp(p):
+              return hashlib.sha256(json.dumps(p, sort_keys=True).encode()).hexdigest()
+
+          packages, files, rels, describes, creators = {}, {}, [], [], set()
+          for i, path in enumerate(srcs):
+              d = json.load(open(path))
+              creators.update(d.get("creationInfo", {}).get("creators", []))
+              idmap = {}
+              for p in d.get("packages", []):
+                  pid = p["SPDXID"]
+                  if pid in packages and fp(packages[pid]) == fp(p):
+                      idmap[pid] = pid            # same component in two images: share it
+                      continue
+                  new = pid if pid not in packages else "SPDXRef-i%d-%s" % (i, pid[8:])
+                  q = dict(p); q["SPDXID"] = new
+                  packages[new] = q
+                  idmap[pid] = new
+              # Some images (grafana) also emit a files array, and relationships point at
+              # those SPDXRef-File ids. Dropping them leaves dangling references, so carry
+              # them through the same id map as packages.
+              for fl in d.get("files", []):
+                  fid = fl["SPDXID"]
+                  if fid in files and fp(files[fid]) == fp(fl):
+                      idmap[fid] = fid
+                      continue
+                  new = fid if fid not in files else "SPDXRef-i%d-%s" % (i, fid[8:])
+                  q = dict(fl); q["SPDXID"] = new
+                  files[new] = q
+                  idmap[fid] = new
+              for r in d.get("relationships", []):
+                  a, b = r["spdxElementId"], r["relatedSpdxElement"]
+                  if a == "SPDXRef-DOCUMENT":
+                      describes.append(idmap.get(b, b))   # this doc's image becomes one of ours
+                      continue
+                  rels.append((idmap.get(a, a), idmap.get(b, b), r["relationshipType"]))
+
+          seen, uniq = set(), []
+          for r in rels:
+              if r not in seen:
+                  seen.add(r); uniq.append(r)
+
+          repo = os.environ.get("GITHUB_REPOSITORY", "local/local")
+          run = os.environ.get("GITHUB_RUN_ID", "local")
+          sha = os.environ.get("GITHUB_SHA", "local")
+          doc = {
+              "spdxVersion": "SPDX-2.3",
+              "dataLicense": "CC0-1.0",
+              "SPDXID": "SPDXRef-DOCUMENT",
+              "name": "%s container images" % repo,
+              "documentNamespace": "https://github.com/%s/spdx/%s-%s" % (repo, run, sha),
+              "creationInfo": {
+                  "creators": sorted(creators) + ["Tool: trivy-sbom-workflow"],
+                  "created": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              },
+              "packages": list(packages.values()),
+              "files": list(files.values()),
+              "relationships": [
+                  {"spdxElementId": "SPDXRef-DOCUMENT", "relatedSpdxElement": x, "relationshipType": "DESCRIBES"}
+                  for x in describes
+              ] + [
+                  {"spdxElementId": a, "relatedSpdxElement": b, "relationshipType": t} for a, b, t in uniq
+              ],
+          }
+          with open(OUT, "w") as fh:
+              json.dump(doc, fh, indent=2)
+          print("  %s: %d images, %d packages, %d files, %d relationships"
+                % (OUT, len(describes), len(doc["packages"]), len(doc["files"]),
+                   len(doc["relationships"])))
+          PYSCRIPT
+
+      - name: Save Clean SPDX Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-spdx-sbom
+          path: sbom-exports/
+          # Default is a warning, which lets an empty run look green.
+          if-no-files-found: error

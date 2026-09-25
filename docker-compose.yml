@@ -1,0 +1,273 @@
+# docker-compose.yml — Intel XPU full-stack monitoring (single node)
+#
+# Four containers:
+#   - xpumd v2.0      GPU hardware metrics via Level Zero    :9471
+#   - node-exporter   CPU, RAM, disk, network, hwmon temps   :9100
+#   - Prometheus      scrapes all + vLLM 8000-8008           :9090
+#   - Grafana         4 provisioned dashboards               :3000
+#
+# None of these images are shipped or redistributed by Intel. This repository
+# contains configuration only — YAML and dashboard JSON. Your own Docker pulls
+# each image straight from its upstream registry (ghcr.io, Docker Hub) at
+# `docker compose up`, unmodified, and each stays under its own upstream
+# licence.
+#
+# The three images this stack does not own track :latest, so every `docker
+# compose pull` picks up upstream's current CVE fixes without an edit here.
+# xpumd is deliberately held on its bare v2.0.0 tag — it talks to GPU hardware
+# through Level Zero, so its version is held until a bump is validated on the
+# B70 host. Scan what you are about to run with:
+#   trivy image --platform linux/amd64 --scanners vuln <repo>:<tag>
+#
+# vLLM metrics: Prometheus scrapes ports 8000-8008 every 5s. Ports with nothing
+# on them cost <1ms each. When vLLM starts on one, metrics appear within 5s.
+#
+# All volume paths are relative to THIS file, so run compose from this directory:
+#   docker compose up -d
+#
+# Overhead: ~400 MB RAM, <3% of one core.
+#
+# SECURE DEFAULTS — every listener binds to 127.0.0.1, anonymous Grafana access
+# is read-only, no admin/lifecycle/debug endpoint is reachable, and nothing
+# dials out. Opening any of that up takes a deliberate environment variable, so
+# nobody gets a less-secure configuration by accident. The reason for each
+# setting is in a comment next to it.
+#
+# Two things cannot be dropped without breaking what the stack is for, and are
+# accepted deliberately: host networking (node-exporter needs the host network
+# and PID namespace for its metrics to be correct) and xpumd running as root
+# with CAP_SYS_ADMIN (Level Zero GPU telemetry requires it). Both are contained
+# by the loopback binds, the dropped capabilities and the read-only mounts.
+#
+# Verify after `docker compose up -d`:
+#   ss -ltn | grep -E ':(3000|9090|9100|9471|8889)'   # all 127.0.0.1
+#   curl -s -X POST localhost:9090/-/reload           # "Lifecycle API is not enabled." (403)
+#   curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:3000/api/datasources \
+#     -H 'Content-Type: application/json' -d '{}'     # 403 — anonymous cannot add one
+#   curl -sI localhost:3000/login | grep -i x-frame   # X-Frame-Options: deny
+#   ss -tnp state established | grep -Ev '127\.0\.0\.1|\[::1\]'   # no beacons
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  xpumd:
+    image: ghcr.io/intel/xpumanager/xpumd:v2.0.0
+    container_name: xpumd
+    restart: unless-stopped
+    # Root + SYS_ADMIN is required, not convenience: xpumd reads GPU telemetry
+    # through Level Zero, which needs the PMU access SYS_ADMIN gates. Everything
+    # else is dropped, and no-new-privileges blocks any setuid escalation on top
+    # of what is granted. Narrowing SYS_ADMIN further (PERFMON + SYS_NICE may be
+    # enough) is untested and needs a run on real GPU hardware first, because the
+    # failure mode is silently missing metrics rather than a startup error.
+    user: "0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    network_mode: host
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./xpumd/config.yaml:/etc/xpumd/config.yaml:ro
+    command: [ "--config", "/etc/xpumd/config.yaml" ]
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    # Needs no capabilities at all: it only reads /proc, /sys and / (all mounted
+    # read-only) and binds a port above 1024. It writes nothing, so its own root
+    # filesystem is read-only too.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    network_mode: host
+    pid: host
+    mem_limit: 256m
+    cpus: 0.5
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      # Loopback by default — host metrics (uptime, kernel version, mounted
+      # filesystems, every network interface) are reconnaissance material and
+      # this endpoint has no authentication of any kind. Override only if you
+      # scrape from another host, and put a firewall in front of it if you do.
+      - "--web.listen-address=${NODE_EXPORTER_BIND_ADDR:-127.0.0.1}:9100"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: intel-xpu-prometheus
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: host
+    mem_limit: 1g
+    mem_reservation: 256m
+    cpus: 0.5
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/gpu_labels.yml:/etc/prometheus/gpu_labels.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # v3 marks both retention flags [DEPRECATED] in favour of the config file's
+      # storage.tsdb section. They still work and still take effect; expect a
+      # deprecation warning in the log. Moving them is a separate change.
+      - "--storage.tsdb.retention.time=1d"
+      - "--storage.tsdb.retention.size=512MB"
+      # --web.enable-lifecycle is deliberately NOT set. It would expose
+      # unauthenticated POST /-/reload and POST /-/quit on :9090, letting anyone
+      # who can reach the port reload the config or shut collection down. The
+      # documented way to apply a config change is `docker compose restart
+      # prometheus`, which never needed the flag. --web.enable-admin-api is off
+      # by default and stays off — it can delete stored series.
+      #
+      # Loopback by default. Prometheus has no authentication, and its query API
+      # will happily hand over every metric the stack holds. Override only if you
+      # scrape or query from another host, and firewall it if you do.
+      - "--web.listen-address=${PROMETHEUS_BIND_ADDR:-127.0.0.1}:9090"
+      - "--query.max-concurrency=8"
+      - "--query.timeout=60s"
+    depends_on:
+      - xpumd
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: intel-xpu-grafana
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: host
+    mem_limit: 768m
+    mem_reservation: 384m
+    cpus: 1.5
+    environment:
+      # Loopback by default. Anonymous access is on (below), so a 0.0.0.0 bind
+      # would hand every dashboard to the whole network with no login. Reach it
+      # over an SSH tunnel — see README.md "Remote access". Override only if you
+      # have put authentication or a reverse proxy in front of it.
+      - GF_SERVER_HTTP_ADDR=${GF_SERVER_HTTP_ADDR:-127.0.0.1}
+      - GF_SERVER_HTTP_PORT=3000
+      - GF_SERVER_ROOT_URL=${GF_SERVER_ROOT_URL:-http://localhost:3000/}
+      - GF_SERVER_SERVE_FROM_SUB_PATH=${GF_SERVER_SERVE_FROM_SUB_PATH:-false}
+      # No admin credentials are set: the login form is disabled and anonymous
+      # access is on, so nothing ever authenticates. Reach Grafana over an SSH
+      # tunnel — see README.md "Remote access".
+      #
+      # Anonymous users get Viewer, the least privilege that still shows a
+      # dashboard. NOT Admin: an anonymous Admin can add a datasource pointing
+      # anywhere and have Grafana's proxy fetch it, turning a read-only telemetry
+      # UI into an unauthenticated request forwarder into your network, and can
+      # also mint service-account tokens. Nothing this stack does needs Admin —
+      # dashboards and the datasource are provisioned from disk and marked
+      # non-editable, so there is nothing left to administer through the UI.
+      #
+      # Viewer cannot open Explore or run ad-hoc queries in Grafana OSS. If you
+      # want that, set GF_AUTH_ANONYMOUS_ORG_ROLE=Editor knowing it also allows
+      # editing dashboards in the session, or better, turn anonymous off and log
+      # in: GF_AUTH_ANONYMOUS_ENABLED=false, GF_AUTH_DISABLE_LOGIN_FORM=false,
+      # plus your own GF_SECURITY_ADMIN_USER / GF_SECURITY_ADMIN_PASSWORD (keep
+      # those out of this file — use .env, which is gitignored, or your secret
+      # store).
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=${GF_AUTH_ANONYMOUS_ORG_ROLE:-Viewer}
+      - GF_AUTH_BASIC_ENABLED=false
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_USERS_VIEWERS_CAN_EDIT=false
+      # Grafana's three analytics/update defaults are all ON upstream, and each
+      # one dials out over HTTPS: stats.grafana.org for usage counters, GitHub
+      # every ten minutes for new Grafana releases, grafana.com for plugin
+      # releases. A GPU telemetry host has no reason to beacon to the internet.
+      # These are three of the five settings that had to be off before "this
+      # stack initiates no outbound TLS" was actually true — the other two are
+      # the plugin preinstall pair further down, which turned out to be the one
+      # that mattered most. Keeping that statement true is what keeps the
+      # crypto/tls and x/crypto CVEs in any Go image off a reachable code path.
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false
+      # Two more upstream-on features that dial out, and that the comment above
+      # would otherwise be wrong about: publishing a snapshot uploads dashboard
+      # data to snapshots.raintank.io, and the home page pulls an RSS feed from
+      # grafana.com. Neither has a use on a telemetry host.
+      - GF_SNAPSHOTS_EXTERNAL_ENABLED=false
+      - GF_NEWS_NEWS_FEED_ENABLED=false
+      # Unused module, so it is off: nothing here provisions an alert rule, and
+      # leaving it on runs a rule scheduler and an outbound notifier we would
+      # never use. If you do want alerts, set this back to true — that is the
+      # only change needed.
+      - GF_UNIFIED_ALERTING_ENABLED=false
+      # Off by default: embedding permits any site to frame Grafana, which is
+      # what makes clickjacking possible, and it forces the X-Frame-Options and
+      # CSP frame-ancestors protections off. Set to true only if you are
+      # deliberately iframing a dashboard, and pair it with
+      # GF_SECURITY_CSRF_TRUSTED_ORIGINS for the embedding origin.
+      - GF_SECURITY_ALLOW_EMBEDDING=${GF_SECURITY_ALLOW_EMBEDDING:-false}
+      - GF_SECURITY_COOKIE_SAMESITE=${GF_SECURITY_COOKIE_SAMESITE:-lax}
+      - GF_SECURITY_COOKIE_SECURE=${GF_SECURITY_COOKIE_SECURE:-false}
+      # Must be true here. Grafana skips its CSRF check for unauthenticated
+      # requests, and with anonymous access on, every request is unauthenticated
+      # — so false would mean no CSRF protection at all.
+      - GF_SECURITY_CSRF_ALWAYS_CHECK=true
+      - GF_SECURITY_CSRF_TRUSTED_ORIGINS=${GF_SECURITY_CSRF_TRUSTED_ORIGINS:-localhost}
+      # No plugins are installed or needed; refuse unsigned ones outright.
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=
+      - GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED=true
+      # PREINSTALL_DISABLED is the one that actually stops Grafana beaconing.
+      # Verified on a live host running 13.0.8: with all three analytics
+      # settings above already false, Grafana still held an open TLS connection
+      # to grafana.com because its plugin.backgroundinstaller downloads five
+      # plugins nobody asked for at every start — grafana-lokiexplore-app,
+      # grafana-pyroscope-app, grafana-exploretraces-app,
+      # grafana-metricsdrilldown-app and elasticsearch. That is an image
+      # default ([plugins] preinstall), not something configured here. Turning
+      # it off removed the connection; AUTO_UPDATE=false stops the same fetch
+      # for any plugin already in the volume.
+      - GF_PLUGINS_PREINSTALL_DISABLED=true
+      - GF_PLUGINS_PREINSTALL_AUTO_UPDATE=false
+      # No plugin can be installed, updated or removed through the UI or API —
+      # nothing here needs one, and this is the path an anonymous session would
+      # use if the org role were ever widened past Viewer.
+      - GF_PLUGINS_PLUGIN_ADMIN_ENABLED=false
+      # Advisor is on by default in 13.x and calls grafana.com for plugin and
+      # datasource deprecation advice. Useful on an internet-connected Grafana,
+      # pointless on a loopback telemetry host.
+      - GF_FEATURE_TOGGLES_GRAFANAADVISOR=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/xpumd-single-node.json
+      # Debug and profiling stay off. GF_LOG_LEVEL=debug logs request detail you
+      # do not want persisted, and the pprof endpoints expose process internals.
+      # Raise the log level temporarily when troubleshooting, then put it back.
+      - GF_LOG_LEVEL=info
+      - GF_DIAGNOSTICS_PROFILING_ENABLED=false
+      - GF_DIAGNOSTICS_TRACING_ENABLED=false
+      - GF_DATAPROXY_TIMEOUT=90
+      - GF_DATAPROXY_MAX_IDLE_CONNECTIONS_PER_HOST=16
+      - GF_DATABASE_WAL=true
+      - GF_DATABASE_CACHE_MODE=shared
+      - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=5s
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus_data:
+  grafana_data:

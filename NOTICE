@@ -1,0 +1,15 @@
+Xe-full-stack-monitoring
+Copyright 2026 Intel Corporation
+
+Licensed under the Apache License, Version 2.0.
+See the LICENSE file in the root of this repository for the full license terms.
+
+================================================================================
+
+This distribution contains source code, configuration files, monitoring definitions, and documentation developed for the Intel XPU Full-Stack Monitoring project. It includes Docker Compose deployment assets, Prometheus scrape configuration, Grafana dashboards, xpumd settings, and supporting files for collecting GPU, CPU, and vLLM telemetry on Intel XPU hosts.
+
+The project may reference third-party software, libraries, tools, models, and container images, including Intel XPU tooling, Prometheus, Grafana, and vLLM. These components are not included or redistributed as part of this repository and must be obtained separately from their respective upstream sources, subject to their own license terms.
+
+================================================================================
+
+Intel is a trademark of Intel Corporation or its subsidiaries. Other names and brands may be claimed as the property of others.
