@@ -1,4 +1,4 @@
-# docker-compose.yml — Intel XPU full-stack monitoring (single node)
+# docker-compose.yml — Intel full system monitoring (single node)
 #
 # Four containers:
 #   - xpumd v2.0      GPU hardware metrics via Level Zero    :9471
@@ -47,6 +47,10 @@
 #   curl -sI localhost:3000/login | grep -i x-frame   # X-Frame-Options: deny
 #   ss -tnp state established | grep -Ev '127\.0\.0\.1|\[::1\]'   # no beacons
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Pin the Compose project name so volume and network names do not depend on
+# the directory the repo was cloned into.
+name: full-system-monitoring
 
 services:
   xpumd:

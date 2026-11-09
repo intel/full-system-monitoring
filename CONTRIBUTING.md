@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for your interest in improving Xe Full Stack Monitoring. This guide
+Thank you for your interest in improving Full System Monitoring. This guide
 covers the license terms, the sign-off requirement, the branching workflow,
 the review process, and the checks every change should pass.
 
@@ -16,7 +16,7 @@ We welcome pull requests of these kinds:
 
 ## License
 
-Xe Full Stack Monitoring is licensed under the terms in [LICENSE](LICENSE).
+Full System Monitoring is licensed under the terms in [LICENSE](LICENSE).
 By contributing to the project, you agree to the license and copyright terms
 therein and release your contribution under these terms.
 

@@ -1,4 +1,4 @@
-# AGENT.md — Deploy Intel XPU Full-Stack Monitoring
+# AGENT.md — Deploy Intel Full System Monitoring
 
 > **For AI coding agents** (Claude Code, Cursor, Copilot, Gemini, …).
 > This file is the deployment playbook. Follow it top to bottom; every step is a
@@ -62,13 +62,13 @@ ls /sys/module/xe /sys/module/i915 -d 2>/dev/null     # which GPU driver is load
 
 ```bash
 # Option A — clone on the host (preferred)
-git clone https://github.com/intel/xe-full-stack-monitoring.git
-cd xe-full-stack-monitoring
+git clone https://github.com/intel/full-system-monitoring.git
+cd full-system-monitoring
 
 # Option B — no git/network on the host: copy from your laptop
-#   scp -r ./xe-full-stack-monitoring <user>@<gpu-host>:~/
+#   scp -r ./full-system-monitoring <user>@<gpu-host>:~/
 #   add  -J <user>@<jump-host>  if the GPU box sits behind a bastion
-#   then on the host:  cd ~/xe-full-stack-monitoring
+#   then on the host:  cd ~/full-system-monitoring
 ```
 
 The repository is self-contained: compose file, Prometheus config and recording
