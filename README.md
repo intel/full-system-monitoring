@@ -1,4 +1,4 @@
-# Intel XPU Full-Stack Monitoring
+# Intel Full System Monitoring
 
 Real-time GPU, CPU and vLLM inference metrics for Intel XPU hosts — four Docker
 containers, one `docker compose up -d`, four pre-built Grafana dashboards.
@@ -6,8 +6,8 @@ containers, one `docker compose up -d`, four pre-built Grafana dashboards.
 Pure Docker Compose. No CLI to install, no Python, no agent required.
 
 ```bash
-git clone https://github.com/intel/xe-full-stack-monitoring.git
-cd xe-full-stack-monitoring
+git clone https://github.com/intel/full-system-monitoring.git
+cd full-system-monitoring
 docker compose up -d
 ```
 
